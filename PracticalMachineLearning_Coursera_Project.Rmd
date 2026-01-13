@@ -1,0 +1,143 @@
+---
+self_contained: yes
+author: "Irene Mommers"
+date: "`r Sys.Date()`"
+output:
+  html_document: default
+  self_contained: default
+title: "Practical Machine Learning Project"
+---
+
+Data was downloaded and stored into the working directory. I will use the 'pml-training.csv' to partition in a training and test dataset, where the trainingset will be used for development of seperate models, and the trainingset to fit those models and combine them into one predictor. The other dataset ('pml-testing.csv') will be used as validationset and thus not be touched before application of the final model in the end.
+
+
+```{r setup, include=FALSE}
+# load packages
+library(caret, quietly=TRUE)
+library(ggplot2, quietly=TRUE)
+library(corrplot, quietly=TRUE)
+library(dplyr, quietly=TRUE)
+```
+## Read and explore dat
+```{r read train data}
+# load data
+dat = read.csv("pml-training.csv")
+
+# partition
+inBuild <- createDataPartition(y=dat$classe, p=0.75, list=FALSE)
+train <- dat[inBuild,]
+test  <- dat[-inBuild,]
+
+# set seed for reproducibility
+set.seed(75129)
+
+# inspect size of train and test data
+dim(train); dim(test)
+```
+
+At first glance, 19622 observation and 160 variables means that there are plenty of observations per variable, yet it might still be good to cut down the number of variables to include in the model, to prevent overfitting.
+
+Looking at the data (View(train)), it is noticable that there appears to be loads of missingness in some variables and that some variables show little variation. Also, there are time-stamp variables and a character with the date and time - this last one can be removed as it is non-informative as compared to the others.
+
+```{r explore and filter variables}
+
+# set outcome variable to factor
+train$classe <- as.factor(train$classe)
+
+# Remove id and timestamps/windows as these will probably not be predictive
+train <- train %>% select(-X,-user_name,-raw_timestamp_part_1,
+-raw_timestamp_part_2,-cvtd_timestamp,-new_window,-num_window)
+
+# explore missingness
+table(colSums(is.na(train)))
+
+# drop variables with >95% missing
+train <- train[,!((colSums(is.na(train))/nrow(train))>0.95)] 
+dim(train)
+
+# explore near-zero variance
+nsv <- nearZeroVar(train, saveMetrics=TRUE) 
+
+# drop variables from train with
+train <- train[,!(unlist(nsv$nzv))] 
+dim(train)
+
+
+# explore correlatedness of numeric variables
+num <- train[,sapply(train,is.numeric)] # obtain numeric columns
+num <- as.data.frame(sapply(num, scale)) # scale variables
+cor.table <- cor(num)
+diag(cor.table) <-  0 # set the diagonal to 0
+corrplot(cor.table)
+which(cor.table > 0.8, arr.ind=T)
+
+```
+
+
+## Cross validation & model fitting
+
+cross validation needed to be applied. 10-fold cross validation is quite common, thus let's go for 10 folds, using the trainControl() function from the caret package.
+
+As there were only variables where >19 000 cases were missing and thus were dropped or without missings - thus there's no need for imputation. 
+
+Combining predictors proved worthwhile during the course, so I will combine two models: a random forest and a linear discriminant analysis.
+
+Tree-based models generally do not benefit much from principle component analysis, while linear models are sensitive to highly correlated variables . Since there are quite a lot of highly correlated variables and the goal is to make good predictions (not necessarily to build an interpretable model), I have added principle component analysis to the non-tree-based models. I do not want to lose much information, so I used a high threshold (0.95, keeping 95% of the variance). 
+
+To ensemble the models, in the course method='gam' was used. However, generalized additive models are a binary classifier. That is why here I used 'multinom' instead.
+
+
+```{r fit models}
+# cross validation
+train_cv <- trainControl(
+  method = "cv",
+  number = 10
+)
+
+# models 
+# gradient boosting machine
+modFit_gbm <- train(classe ~., method=c("gbm"), trControl=train_cv, data=train, verbose=0)
+# lda
+modFit_lda <- train(classe ~., method=c("lda"), preprocess="PCA", thresh = 0.95,trControl=train_cv, data=train)
+
+
+# predict on test data
+predtestgbm <- predict(modFit_gbm, test) 
+predtestlda <- predict(modFit_lda, test)
+
+# data frame that combines the predictors
+predDf <- data.frame(gbm=predtestgbm, lda=predtestlda,  classe=test$classe)
+
+# cross validation
+test_cv <- trainControl(
+  method = "cv",
+  number = 10
+)
+# Fit model that combines predictors 
+combFit <- train(classe~., method="multinom", trControl=test_cv, data=predDf, trace=FALSE)
+# Make predictions
+predtest <- predict(combFit, predDf)
+# Obtain accuracy and other metrics
+confusionMatrix(predtest, as.factor(test$classe))
+```
+
+## Out of sample error
+
+Although on the testset the accuracy of the combined model is 0.96, it is likely that some overfitting will have taken place. However, with 25 variables and 19622 observations, it probably will still be a feasible model (>0.8 accuracy) when applied out of sample. 
+
+The code below shows predictions performed using the validation dataset.
+
+```{r evaluate}
+# load data for testing
+validation = read.csv("pml-testing.csv")
+
+# predict on validation data
+predvalgbm <- predict(modFit_gbm, validation) 
+predvallda <- predict(modFit_lda, validation)
+
+# Combined prediction data
+predvalDf <- data.frame(gbm=predvalgbm, lda=predvallda)
+
+# predict
+predval <- predict(combFit, newdata=predvalDf)
+```
